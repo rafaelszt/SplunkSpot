@@ -1,0 +1,41 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Splunk Instances
+
+Resources:
+  SplunkMaster:
+    Type: "AWS::EC2::SpotFleet"
+    Properties:
+      SpotFleetRequestConfigData:
+        AllocationStrategy: lowestPrice
+        LaunchTemplateConfigs:
+          -
+            LaunchTemplateSpecification:
+              LaunchTemplateName: "SplunkMaster"
+              Version: 6
+        TargetCapacity: 1
+             
+  SplunkPeers:
+    Type: "AWS::EC2::SpotFleet"
+    DependsOn: SplunkMaster
+    Properties: 
+      SpotFleetRequestConfigData: 
+        AllocationStrategy: lowestPrice
+        LaunchTemplateConfigs: 
+          - 
+            LaunchTemplateSpecification:
+              LaunchTemplateName: "SplunkPeer"
+              Version: 6
+        TargetCapacity: 2
+
+  SplunkSearchHeads:
+    Type: "AWS::EC2::SpotFleet"
+    DependsOn: SplunkMaster
+    Properties: 
+      SpotFleetRequestConfigData: 
+        AllocationStrategy: lowestPrice
+        LaunchTemplateConfigs: 
+          - 
+            LaunchTemplateSpecification:
+              LaunchTemplateName: "SplunkSearchHead"
+              Version: 6
+        TargetCapacity: 2

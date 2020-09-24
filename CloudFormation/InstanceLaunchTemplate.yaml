@@ -1,0 +1,175 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: EC2 Instance Templates
+
+Resources:
+  SplunkSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allows communication between the other instances and the internet
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0 #WARNING! This is open to the internet!
+      - IpProtocol: tcp
+        FromPort: 8000
+        ToPort: 8000
+        CidrIp: 0.0.0.0/0 #WARNING! This is open to the internet!
+      - IpProtocol: tcp
+        FromPort: 8089
+        ToPort: 8089
+        CidrIp: 172.31.0.0/16 #Change this to your VPC range
+      - IpProtocol: tcp
+        FromPort: 9887
+        ToPort: 9887
+        CidrIp: 172.31.0.0/16 #Change this to your VPC range
+      - IpProtocol: tcp
+        FromPort: 9997
+        ToPort: 9997
+        CidrIp: 172.31.0.0/16 #Change this to your VPC range
+
+  SplunkEC2PermissionProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+      - !Ref SplunkEC2PermissionRole
+
+  SplunkEC2PermissionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+            - sts:AssumeRole
+      Path: "/"
+
+  RolePolicies:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: SplunkEC2Permission
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: "ec2:Describe*"
+          Resource: "*"
+      Roles:
+      - !Ref SplunkEC2PermissionRole
+
+  SplunkMaster:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: SplunkMaster
+      LaunchTemplateData:
+        ImageId: ami-0c94855ba95c71c99
+        InstanceType: t3a.large
+        KeyName: splunk #This key must exist
+        SecurityGroupIds: 
+          - !GetAtt SplunkSecurityGroup.GroupId
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize:
+                25 #You should probably increase this if you will ingest anything
+        TagSpecifications:
+          -
+            ResourceType: instance
+            Tags:
+              -
+                Key: Name
+                Value: SplunkMaster
+        UserData:
+          "Fn::Base64":
+            !Sub |
+              #!/bin/bash
+              cd /tmp
+              wget -O splunk.rpm 'https://www.splunk.com/bin/splunk/DownloadActivityServlet?architecture=x86_64&platform=linux&version=8.0.5&product=splunk&filename=splunk-8.0.5-a1a6394cc5ae-linux-2.6-x86_64.rpm&wget=true' 
+              yum localinstall splunk.rpm -y 
+              export SPLUNK_HOME=/opt/splunk
+              $SPLUNK_HOME/bin/splunk start --accept-license --answer-yes --no-prompt --seed-passwd Root@123 
+              $SPLUNK_HOME/bin/splunk edit cluster-config -mode master -replication_factor 2 -search_factor 2 -secret this_key_is_secret -cluster_label main_cluster -auth admin:Root@123 
+              $SPLUNK_HOME/bin/splunk restart
+
+  SplunkPeer:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: SplunkPeer
+      LaunchTemplateData:
+        ImageId: ami-0c94855ba95c71c99 
+        IamInstanceProfile:
+          Arn: !GetAtt SplunkEC2PermissionProfile.Arn
+        InstanceType: t3a.large
+        KeyName: splunk #This key must exist
+        SecurityGroupIds:
+          - !GetAtt SplunkSecurityGroup.GroupId
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize:
+                25
+        TagSpecifications:
+          -
+            ResourceType: instance
+            Tags:
+              -
+                Key: Name
+                Value: SplunkPeer
+        UserData:
+          "Fn::Base64":
+            !Sub |
+              #!/bin/bash
+              cd /tmp
+              wget -O splunk.rpm 'https://www.splunk.com/bin/splunk/DownloadActivityServlet?architecture=x86_64&platform=linux&version=8.0.5&product=splunk&filename=splunk-8.0.5-a1a6394cc5ae-linux-2.6-x86_64.rpm&wget=true'
+              yum localinstall splunk.rpm -y
+              export SPLUNK_HOME=/opt/splunk
+              masterIPAddress=$(aws --region us-east-1 ec2 describe-instances --filters Name=tag:Name,Values=SplunkMaster --query 'Reservations[].Instances[].PrivateIpAddress' --output text)
+              $SPLUNK_HOME/bin/splunk start --accept-license --answer-yes --no-prompt --seed-passwd Root@123
+              $SPLUNK_HOME/bin/splunk edit cluster-config -mode slave -master_uri https://"$masterIPAddress":8089 -replication_port 9887 -secret  this_key_is_secret -auth admin:Root@123
+              $SPLUNK_HOME/bin/splunk restart
+
+
+  SplunkSearchHead:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: SplunkSearchHead
+      LaunchTemplateData:
+        ImageId: ami-0c94855ba95c71c99
+        IamInstanceProfile:
+          Arn: !GetAtt SplunkEC2PermissionProfile.Arn
+        InstanceType: t3a.large
+        KeyName: splunk #This key must exist
+        SecurityGroupIds: 
+          - !GetAtt SplunkSecurityGroup.GroupId
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize:
+                25
+        TagSpecifications:
+          -
+            ResourceType: instance
+            Tags:
+              -
+                Key: Name
+                Value: SplunkSearchHead
+        UserData:
+          "Fn::Base64":
+            !Sub |
+              #!/bin/bash
+              cd /tmp 
+              yum install jq -y
+              wget -O splunk.rpm 'https://www.splunk.com/bin/splunk/DownloadActivityServlet?architecture=x86_64&platform=linux&version=8.0.5&product=splunk&filename=splunk-8.0.5-a1a6394cc5ae-linux-2.6-x86_64.rpm&wget=true' 
+              yum localinstall splunk.rpm -y
+              export SPLUNK_HOME=/opt/splunk
+              masterIpAddress=$(aws --region us-east-1 ec2 describe-instances --filters Name=tag:Name,Values=SplunkMaster --query 'Reservations[].Instances[].PrivateIpAddress' --output text)
+              $SPLUNK_HOME/bin/splunk start --accept-license --answer-yes --no-prompt --seed-passwd Root@123
+              $SPLUNK_HOME/bin/splunk edit cluster-config -mode searchhead -master_uri https://"$masterIpAddress":8089 -secret this_key_is_secret -auth admin:Root@123
+              $SPLUNK_HOME/bin/splunk restart
+
+
